@@ -1,0 +1,27 @@
+[package]
+name = "gitea-ci-autoscaler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+hcloud = "0.22"
+k8s-openapi = { version = "0.24", features = ["v1_32"] }
+kube = { version = "0.98", features = ["runtime", "client", "derive"] }
+prometheus = "0.13"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints.clippy]
+unwrap_used = "deny"
