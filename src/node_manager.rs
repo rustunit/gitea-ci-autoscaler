@@ -620,10 +620,11 @@ mod tests {
         ));
 
         // Verify Gitea delete was called
-        let gitea_calls = mock_gitea.delete_runner_calls.lock().unwrap();
-        assert_eq!(gitea_calls.len(), 1);
-        assert_eq!(gitea_calls[0], 100);
-        drop(gitea_calls);
+        {
+            let gitea_calls = mock_gitea.delete_runner_calls.lock().unwrap();
+            assert_eq!(gitea_calls.len(), 1);
+            assert_eq!(gitea_calls[0], 100);
+        }
 
         // Step 2: Deregistering -> Draining
         let removed = mgr
