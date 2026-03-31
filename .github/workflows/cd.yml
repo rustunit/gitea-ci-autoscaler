@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  pull_request:
+    branches: ["**"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -51,9 +53,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   create-release:
     name: Create GitHub Release
