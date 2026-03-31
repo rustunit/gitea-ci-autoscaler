@@ -8,7 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: "rustunit/gitea-ci-autoscaler"
 
 jobs:
   build-and-push:
