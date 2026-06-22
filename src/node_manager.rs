@@ -106,8 +106,12 @@ impl NodeManager {
     ) {
         for _ in 0..count {
             let name = format!("ci-runner-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-            let cloud_init_data =
-                cloud_init::render(&self.master_ip, &config.cluster_secret, &self.k3s_version);
+            let cloud_init_data = cloud_init::render(
+                &self.master_ip,
+                &config.cluster_secret,
+                &self.k3s_version,
+                &config.k3s_agent_args,
+            );
 
             info!(server_name = %name, "creating Hetzner server");
             match hetzner.create_server(&name, &cloud_init_data).await {

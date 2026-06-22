@@ -300,6 +300,7 @@ mod tests {
             gitea_admin_token: "test".into(),
             pushgateway_url: "http://localhost:9091".into(),
             runner_namespace: "gitea-runners".into(),
+            k3s_agent_args: "--node-label=managed-by=gitea-ci-autoscaler".into(),
         }
     }
 
