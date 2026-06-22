@@ -37,6 +37,7 @@ All configuration is via environment variables.
 | `HETZNER_SERVER_TYPE` | `ccx33` | Hetzner instance type |
 | `HETZNER_LOCATION` | `nbg1` | Hetzner datacenter location |
 | `HETZNER_IMAGE` | `ubuntu-24.04` | OS image for new servers |
+| `K3S_AGENT_ARGS` | `--node-label=managed-by=gitea-ci-autoscaler --node-label=node-role=ci-runner` | Extra arguments appended to the `k3s agent` command in each node's cloud-init. Use to set node labels, taints, etc. (e.g. add `--node-taint=ci=true:NoSchedule`) |
 | `PUSHGATEWAY_URL` | *required* | Prometheus Pushgateway endpoint |
 
 ## Metrics

@@ -25,7 +25,12 @@ pub struct Config {
     pub gitea_admin_token: String,
     pub pushgateway_url: String,
     pub runner_namespace: String,
+    /// Extra args appended to the `k3s agent` command (labels, taints, ...).
+    pub k3s_agent_args: String,
 }
+
+const DEFAULT_K3S_AGENT_ARGS: &str =
+    "--node-label=managed-by=gitea-ci-autoscaler --node-label=node-role=ci-runner";
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -44,6 +49,7 @@ impl Config {
             gitea_admin_token: required_env("GITEA_ADMIN_TOKEN")?,
             pushgateway_url: required_env("PUSHGATEWAY_URL")?,
             runner_namespace: env_or("RUNNER_NAMESPACE", "gitea-runners"),
+            k3s_agent_args: env_or("K3S_AGENT_ARGS", DEFAULT_K3S_AGENT_ARGS),
         })
     }
 }
@@ -90,6 +96,7 @@ mod tests {
             "GITEA_ADMIN_TOKEN",
             "PUSHGATEWAY_URL",
             "RUNNER_NAMESPACE",
+            "K3S_AGENT_ARGS",
         ] {
             unsafe { env::remove_var(key) };
         }
@@ -122,6 +129,26 @@ mod tests {
         assert_eq!(config.hetzner_image, "ubuntu-24.04");
         assert_eq!(config.gitea_api_url, "http://gitea.example.com");
         assert_eq!(config.runner_namespace, "gitea-runners");
+        assert_eq!(config.k3s_agent_args, DEFAULT_K3S_AGENT_ARGS);
+    }
+
+    #[test]
+    fn config_custom_k3s_agent_args() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        unsafe {
+            env::set_var(
+                "K3S_AGENT_ARGS",
+                "--node-label=node-role=ci-runner --node-taint=ci=true:NoSchedule",
+            );
+        }
+
+        let config = Config::from_env().unwrap();
+        assert_eq!(
+            config.k3s_agent_args,
+            "--node-label=node-role=ci-runner --node-taint=ci=true:NoSchedule"
+        );
     }
 
     #[test]
