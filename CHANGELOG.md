@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1]
+
+### Fixed
+
+- Control loop no longer fails with `missing field 'datacenter'`.
+- Server listings are now paginated.
+- Failed Hetzner API calls now report the error message.
+
+### Changed
+
+- Replaced the `hcloud` dependency with direct HTTP calls that deserialize only
+  the server fields we use, so future additions or removals in the Hetzner API
+  cannot break deserialization again.
+
 ## [0.2.0]
 
 ### Added
