@@ -52,6 +52,7 @@ Pushes Prometheus metrics to the configured Pushgateway, including:
 - Per-node age and idle duration
 - Provisioning duration (server creation to ready)
 - Control loop duration
+- Timestamp of the last successful loop iteration (for staleness alerting)
 
 ## Building
 
