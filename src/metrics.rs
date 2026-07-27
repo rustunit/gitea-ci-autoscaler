@@ -19,6 +19,7 @@ pub struct Metrics {
     pub node_age_seconds: GaugeVec,
     pub node_idle_seconds: GaugeVec,
     pub provisioning_duration: Histogram,
+    pub last_success_timestamp: Gauge,
     registry: Registry,
 }
 
@@ -98,6 +99,13 @@ impl Metrics {
             .buckets(vec![30.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0, 600.0]),
         )
         .expect("metric");
+        let last_success_timestamp = Gauge::new(
+            "autoscaler_last_success_timestamp_seconds",
+            "Unix time of the last fully-successful control loop iteration",
+        )
+        .expect("metric");
+        // Seed with startup time so a fresh process isn't flagged stale before its first success.
+        last_success_timestamp.set(chrono::Utc::now().timestamp() as f64);
 
         registry
             .register(Box::new(desired_nodes.clone()))
@@ -147,6 +155,9 @@ impl Metrics {
         registry
             .register(Box::new(provisioning_duration.clone()))
             .expect("register");
+        registry
+            .register(Box::new(last_success_timestamp.clone()))
+            .expect("register");
 
         Self {
             desired_nodes,
@@ -165,6 +176,7 @@ impl Metrics {
             node_age_seconds,
             node_idle_seconds,
             provisioning_duration,
+            last_success_timestamp,
             registry,
         }
     }

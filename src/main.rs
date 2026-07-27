@@ -63,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
 
         match run_loop_iteration(&mut manager, &gitea, &hetzner, &kube, &metrics, &config).await {
             Ok(()) => {
+                metrics
+                    .last_success_timestamp
+                    .set(chrono::Utc::now().timestamp() as f64);
                 if consecutive_failures > 0 {
                     info!(
                         previous_failures = consecutive_failures,
