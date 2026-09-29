@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2]
+
+### Fixed
+
+- Stuck servers are deleted once per iteration instead of twice when more than
+  one is stuck at the same time (the second call failed with a Hetzner 404).
+
 ## [0.3.1]
 
 ### Fixed
