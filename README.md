@@ -74,7 +74,7 @@ The Docker image is built as a static musl binary and runs from `scratch` — th
 
 ### Cluster
 
-- A **K3s cluster** — the autoscaler uses K3s-specific mechanisms to join new nodes (the `get.k3s.io` install script, K3s join token, and K3s version detection from existing nodes). The control plane must be reachable from newly created Hetzner servers on port 6443.
+- A **K3s cluster** — the autoscaler uses K3s-specific mechanisms to join new nodes (the `get.k3s.io` install script, falling back to the version-tagged copy on GitHub, K3s join token, and K3s version detection from existing nodes). The control plane must be reachable from newly created Hetzner servers on port 6443.
 - A **Hetzner Cloud** project with an API token and at least one SSH key — all project SSH keys are automatically added to created servers.
 - A **Gitea** instance with Actions enabled and an admin API token.
 
