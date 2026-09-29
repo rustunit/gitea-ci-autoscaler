@@ -190,9 +190,12 @@ async fn run_loop_iteration(
 
     // Handle stuck servers (from both reconcile and carry_forward), deduplicated
     let mut all_actions: Vec<_> = actions.into_iter().chain(carry_forward_actions).collect();
-    all_actions.dedup_by_key(|a| match a {
+    // dedup only drops adjacent duplicates, so sort first: both sources list the same servers.
+    let server_id = |a: &reconcile::ReconcileAction| match a {
         reconcile::ReconcileAction::DeleteStuckServer { server_id } => *server_id,
-    });
+    };
+    all_actions.sort_by_key(server_id);
+    all_actions.dedup_by_key(|a| server_id(a));
     for action in all_actions {
         match action {
             reconcile::ReconcileAction::DeleteStuckServer { server_id } => {
@@ -594,26 +597,29 @@ mod tests {
 
         let created = Utc::now() - ChronoDuration::minutes(15); // past 10 min timeout
 
-        // Hetzner still shows the stuck server (no k8s node) → reconcile emits DeleteStuckServer
-        mock_hetzner
-            .servers
-            .lock()
-            .unwrap()
-            .push(crate::hetzner::HetznerServer {
-                id: 42,
-                name: "ci-runner-stuck".into(),
-                created,
-                labels: std::collections::HashMap::new(),
-            });
-
-        // Previous iteration had this server as Provisioning → carry_forward also emits DeleteStuckServer
+        // Two stuck servers, so both action lists interleave as [42, 43, 42, 43]
         let mut manager = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
-        manager.nodes.push(node_manager::ManagedNode {
-            hetzner_server_id: 42,
-            hetzner_server_name: "ci-runner-stuck".into(),
-            created_at: created,
-            state: node_manager::NodeState::Provisioning,
-        });
+        for id in [42, 43] {
+            let name = format!("ci-runner-stuck-{id}");
+            // Hetzner still shows the stuck server (no k8s node) → reconcile emits DeleteStuckServer
+            mock_hetzner
+                .servers
+                .lock()
+                .unwrap()
+                .push(crate::hetzner::HetznerServer {
+                    id,
+                    name: name.clone(),
+                    created,
+                    labels: std::collections::HashMap::new(),
+                });
+            // Previous iteration had it as Provisioning → carry_forward also emits DeleteStuckServer
+            manager.nodes.push(node_manager::ManagedNode {
+                hetzner_server_id: id,
+                hetzner_server_name: name,
+                created_at: created,
+                state: node_manager::NodeState::Provisioning,
+            });
+        }
 
         run_loop_iteration(
             &mut manager,
@@ -626,9 +632,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Should only delete once, not twice
-        let delete_calls = mock_hetzner.delete_calls.lock().unwrap();
-        assert_eq!(delete_calls.len(), 1);
-        assert_eq!(delete_calls[0], 42);
+        // Each server deleted once, not twice
+        let mut delete_calls = mock_hetzner.delete_calls.lock().unwrap().clone();
+        delete_calls.sort_unstable();
+        assert_eq!(delete_calls, vec![42, 43]);
     }
 }
