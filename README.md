@@ -10,7 +10,7 @@ The autoscaler runs a continuous reconciliation loop (default: every 5 seconds):
 2. **Reconcile** — Matches servers to nodes to runners and classifies each as Provisioning, Busy, Idle, Draining, or Removing.
 3. **Scale up** — If there are more waiting jobs than available capacity (idle + provisioning + permanent runners), creates new Hetzner servers that auto-join the K3s cluster via cloud-init. When Hetzner has no capacity for the preferred server type, it falls back to the next configured location or type (see [Fallback](#fallback)).
 4. **Scale down** — Idle nodes past the timeout are torn down in stages: deregister runner from Gitea, drain the K8s node, delete the node, delete the Hetzner server. Teardown is deferred to the end of the billing hour to avoid paying for unused time.
-5. **Clean up** — Servers stuck in provisioning beyond a timeout are automatically deleted.
+5. **Clean up** — Servers stuck in provisioning beyond a timeout are automatically deleted. K8s nodes whose server no longer exists (for example after a manual delete in the Hetzner console) are removed from the cluster, and their runner is deregistered, once they have been NotReady for 30 seconds.
 
 ### Node Lifecycle
 

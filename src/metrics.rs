@@ -14,6 +14,7 @@ pub struct Metrics {
     pub scale_up_errors_total: IntCounter,
     pub scale_down_errors_total: IntCounter,
     pub runners_deregistered_total: IntCounter,
+    pub orphaned_nodes_removed_total: IntCounter,
     pub hetzner_api_duration: Histogram,
     pub gitea_api_duration: Histogram,
     pub k8s_api_duration: Histogram,
@@ -69,6 +70,11 @@ impl Metrics {
         let runners_deregistered_total = IntCounter::new(
             "autoscaler_runners_deregistered_total",
             "Runners deregistered from Gitea",
+        )
+        .expect("metric");
+        let orphaned_nodes_removed_total = IntCounter::new(
+            "autoscaler_orphaned_nodes_removed_total",
+            "K8s nodes removed because their Hetzner server was gone",
         )
         .expect("metric");
         let hetzner_api_duration = Histogram::with_opts(HistogramOpts::new(
@@ -155,6 +161,9 @@ impl Metrics {
             .register(Box::new(runners_deregistered_total.clone()))
             .expect("register");
         registry
+            .register(Box::new(orphaned_nodes_removed_total.clone()))
+            .expect("register");
+        registry
             .register(Box::new(hetzner_api_duration.clone()))
             .expect("register");
         registry
@@ -195,6 +204,7 @@ impl Metrics {
             scale_up_errors_total,
             scale_down_errors_total,
             runners_deregistered_total,
+            orphaned_nodes_removed_total,
             hetzner_api_duration,
             gitea_api_duration,
             k8s_api_duration,

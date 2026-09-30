@@ -4,6 +4,8 @@ use async_trait::async_trait;
 pub struct K8sNode {
     pub name: String,
     pub unschedulable: bool,
+    /// The kubelet is reporting in (Ready condition is True).
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,10 @@ impl KubeClient for RealKubeClient {
             .map(|n| K8sNode {
                 name: n.metadata.name.unwrap_or_default(),
                 unschedulable: n.spec.and_then(|s| s.unschedulable).unwrap_or(false),
+                ready: n
+                    .status
+                    .and_then(|s| s.conditions)
+                    .is_some_and(|c| c.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
             })
             .collect();
         info!(count = result.len(), label_selector, "listed k8s nodes");

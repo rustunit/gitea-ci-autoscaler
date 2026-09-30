@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1]
+
+### Fixed
+
+- A k8s node whose Hetzner server is gone (deleted by hand, or lost by Hetzner) is
+  removed from the cluster and its runner deregistered from Gitea. Such a node used to
+  stay NotReady forever. It is removed once it has been NotReady with no matching
+  server for 30 seconds; a Ready node is never touched.
+
+### Added
+
+- Metric `autoscaler_orphaned_nodes_removed_total`.
+
 ## [0.4.0]
 
 ### Added
