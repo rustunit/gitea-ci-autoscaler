@@ -6,7 +6,7 @@ use crate::cloud_init;
 use crate::config::Config;
 use crate::gitea::{GiteaClient, Runner};
 use crate::hetzner::{CreateError, HetznerClient, HetznerServer, Placement};
-use crate::k8s::KubeClient;
+use crate::k8s::{K8sNode, K8sPod, KubeClient};
 use crate::metrics::Metrics;
 
 #[derive(Debug, Clone)]
@@ -57,6 +57,10 @@ impl NodeState {
 /// A new server can lag behind in `list_servers`; only after this is a missing one looked up.
 const VANISH_GRACE_SECS: i64 = 20;
 
+/// How long a node must be NotReady with no Hetzner server before it is removed.
+/// Short enough to beat a one-minute NotReady alert.
+const ORPHAN_GRACE_SECS: i64 = 30;
+
 pub struct NodeManager {
     pub nodes: Vec<ManagedNode>,
     pub k3s_version: String,
@@ -65,6 +69,8 @@ pub struct NodeManager {
     unavailable_until: HashMap<Placement, DateTime<Utc>>,
     /// Where each server that has not joined yet was created, to blame if it vanishes.
     pending_placements: HashMap<i64, Placement>,
+    /// K8s nodes seen NotReady without a Hetzner server, and since when.
+    orphaned_since: HashMap<String, DateTime<Utc>>,
 }
 
 impl NodeManager {
@@ -75,6 +81,7 @@ impl NodeManager {
             master_ip,
             unavailable_until: HashMap::new(),
             pending_placements: HashMap::new(),
+            orphaned_since: HashMap::new(),
         }
     }
 
@@ -288,6 +295,62 @@ impl NodeManager {
                 }
             })
             .collect()
+    }
+
+    /// K8s nodes whose Hetzner server is gone (deleted by hand, or lost by Hetzner).
+    /// Teardown only runs for servers that still exist, so nothing else cleans these up.
+    pub fn find_orphaned_nodes(
+        &mut self,
+        servers: &[HetznerServer],
+        k8s_nodes: &[K8sNode],
+        now: DateTime<Utc>,
+    ) -> Vec<String> {
+        // A Ready node has a live server behind it, whatever the Hetzner listing says.
+        let orphans: Vec<&K8sNode> = k8s_nodes
+            .iter()
+            .filter(|n| !n.ready && !servers.iter().any(|s| s.name == n.name))
+            .collect();
+        self.orphaned_since
+            .retain(|name, _| orphans.iter().any(|n| n.name == *name));
+
+        orphans
+            .into_iter()
+            .filter(|n| {
+                let since = *self.orphaned_since.entry(n.name.clone()).or_insert(now);
+                (now - since).num_seconds() >= ORPHAN_GRACE_SECS
+            })
+            .map(|n| n.name.clone())
+            .collect()
+    }
+
+    /// Deregister the orphaned node's runner and delete the node from k8s.
+    pub async fn remove_orphaned_node(
+        &mut self,
+        node_name: &str,
+        k8s_pods: &[K8sPod],
+        runners: &[Runner],
+        gitea: &dyn GiteaClient,
+        kube: &dyn KubeClient,
+        metrics: &Metrics,
+    ) {
+        warn!(node = %node_name, "hetzner server is gone, removing orphaned k8s node");
+        let runner = k8s_pods
+            .iter()
+            .filter(|p| p.node_name.as_deref() == Some(node_name))
+            .find_map(|p| runners.iter().find(|r| r.name == p.name));
+        if let Some(runner) = runner {
+            match gitea.delete_runner(runner.id).await {
+                Ok(()) => metrics.runners_deregistered_total.inc(),
+                Err(e) => warn!(error = %e, runner = %runner.name, "failed to deregister runner"),
+            }
+        }
+        match kube.delete_node(node_name).await {
+            Ok(()) => {
+                metrics.orphaned_nodes_removed_total.inc();
+                self.orphaned_since.remove(node_name);
+            }
+            Err(e) => warn!(error = %e, node = %node_name, "failed to delete orphaned k8s node"),
+        }
     }
 
     /// Execute one teardown step for a node. Returns true if the node was fully removed.
@@ -890,6 +953,98 @@ mod tests {
         mgr.drop_vanished_servers(&[], &config, &hetzner, &metrics, later)
             .await;
         assert!(mgr.nodes.is_empty());
+    }
+
+    fn k8s_node(name: &str, ready: bool) -> K8sNode {
+        K8sNode {
+            name: name.into(),
+            unschedulable: false,
+            ready,
+        }
+    }
+
+    fn hetzner_server(name: &str) -> HetznerServer {
+        HetznerServer {
+            id: 1,
+            name: name.into(),
+            created: Utc::now(),
+            labels: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn orphaned_node_is_reported_after_grace() {
+        let mut mgr = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+        let nodes = [k8s_node("ci-runner-gone", false)];
+        let now = Utc::now();
+
+        assert!(mgr.find_orphaned_nodes(&[], &nodes, now).is_empty());
+        let later = now + Duration::seconds(ORPHAN_GRACE_SECS);
+        assert_eq!(
+            mgr.find_orphaned_nodes(&[], &nodes, later),
+            ["ci-runner-gone"]
+        );
+    }
+
+    #[test]
+    fn node_with_server_or_heartbeat_is_never_orphaned() {
+        let mut mgr = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+        let nodes = [
+            // Booting or rebooting: NotReady, but the server exists.
+            k8s_node("ci-runner-booting", false),
+            // Missing from the Hetzner listing, but the kubelet is alive.
+            k8s_node("ci-runner-unlisted", true),
+        ];
+        let servers = [hetzner_server("ci-runner-booting")];
+        let now = Utc::now();
+
+        mgr.find_orphaned_nodes(&servers, &nodes, now);
+        let later = now + Duration::seconds(ORPHAN_GRACE_SECS * 10);
+        assert!(mgr.find_orphaned_nodes(&servers, &nodes, later).is_empty());
+    }
+
+    #[test]
+    fn orphan_grace_restarts_when_node_recovers() {
+        let mut mgr = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+        let now = Utc::now();
+        let step = Duration::seconds(ORPHAN_GRACE_SECS - 1);
+
+        mgr.find_orphaned_nodes(&[], &[k8s_node("ci-runner-flaky", false)], now);
+        mgr.find_orphaned_nodes(&[], &[k8s_node("ci-runner-flaky", true)], now + step);
+        let orphans =
+            mgr.find_orphaned_nodes(&[], &[k8s_node("ci-runner-flaky", false)], now + step * 2);
+        assert!(orphans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn orphaned_node_removal_deregisters_runner_and_deletes_node() {
+        let metrics = Metrics::new();
+        let gitea = MockGiteaClient::new();
+        let kube = MockKubeClient::new();
+        let mut mgr = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+
+        let pods = [
+            K8sPod {
+                name: "runner-gone".into(),
+                namespace: "gitea-runners".into(),
+                node_name: Some("ci-runner-gone".into()),
+            },
+            K8sPod {
+                name: "runner-alive".into(),
+                namespace: "gitea-runners".into(),
+                node_name: Some("ci-runner-alive".into()),
+            },
+        ];
+        let runners = [
+            make_runner(7, "runner-gone", true, false),
+            make_runner(8, "runner-alive", true, false),
+        ];
+
+        mgr.remove_orphaned_node("ci-runner-gone", &pods, &runners, &gitea, &kube, &metrics)
+            .await;
+
+        assert_eq!(*gitea.delete_runner_calls.lock().unwrap(), [7]);
+        assert_eq!(*kube.delete_node_calls.lock().unwrap(), ["ci-runner-gone"]);
     }
 
     #[tokio::test]

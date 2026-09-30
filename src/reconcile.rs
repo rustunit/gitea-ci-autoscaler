@@ -344,10 +344,12 @@ mod tests {
             K8sNode {
                 name: "ci-runner-1".into(),
                 unschedulable: false,
+                ready: true,
             },
             K8sNode {
                 name: "ci-runner-2".into(),
                 unschedulable: false,
+                ready: true,
             },
         ];
         let pods = vec![
@@ -432,6 +434,7 @@ mod tests {
         let k8s_nodes = vec![K8sNode {
             name: "ci-runner-1".into(),
             unschedulable: true,
+            ready: true,
         }];
         // No runner pod
         let (nodes, actions) = reconcile(

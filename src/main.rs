@@ -193,6 +193,11 @@ async fn run_loop_iteration(
     manager
         .drop_vanished_servers(&hetzner_servers, config, hetzner, metrics, now)
         .await;
+    for node_name in manager.find_orphaned_nodes(&hetzner_servers, &k8s_nodes, now) {
+        manager
+            .remove_orphaned_node(&node_name, &k8s_pods, &runners, gitea, kube, metrics)
+            .await;
+    }
 
     // Handle stuck servers (from both reconcile and carry_forward), deduplicated
     let mut all_actions: Vec<_> = actions.into_iter().chain(carry_forward_actions).collect();
@@ -410,6 +415,7 @@ mod tests {
         mock_kube.nodes.lock().unwrap().push(crate::k8s::K8sNode {
             name: "ci-runner-1".into(),
             unschedulable: false,
+            ready: true,
         });
         mock_kube.pods.lock().unwrap().push(crate::k8s::K8sPod {
             name: "runner-1".into(),
@@ -474,6 +480,7 @@ mod tests {
         mock_kube.nodes.lock().unwrap().push(crate::k8s::K8sNode {
             name: "ci-runner-1".into(),
             unschedulable: false,
+            ready: true,
         });
         mock_kube.pods.lock().unwrap().push(crate::k8s::K8sPod {
             name: "runner-1".into(),
