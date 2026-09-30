@@ -8,7 +8,7 @@ The autoscaler runs a continuous reconciliation loop (default: every 5 seconds):
 
 1. **Query state** — Fetches waiting/running jobs from Gitea, lists managed Hetzner servers, K8s nodes, and runner pods.
 2. **Reconcile** — Matches servers to nodes to runners and classifies each as Provisioning, Busy, Idle, Draining, or Removing.
-3. **Scale up** — If there are more waiting jobs than available capacity (idle + provisioning + permanent runners), creates new Hetzner servers that auto-join the K3s cluster via cloud-init.
+3. **Scale up** — If there are more waiting jobs than available capacity (idle + provisioning + permanent runners), creates new Hetzner servers that auto-join the K3s cluster via cloud-init. When Hetzner has no capacity for the preferred server type, it falls back to the next configured location or type (see [Fallback](#fallback)).
 4. **Scale down** — Idle nodes past the timeout are torn down in stages: deregister runner from Gitea, drain the K8s node, delete the node, delete the Hetzner server. Teardown is deferred to the end of the billing hour to avoid paying for unused time.
 5. **Clean up** — Servers stuck in provisioning beyond a timeout are automatically deleted.
 
@@ -34,11 +34,20 @@ All configuration is via environment variables.
 | `IDLE_TIMEOUT_MINS` | `5` | How long a node must be idle before teardown |
 | `BILLING_WINDOW_MINS` | `5` | Only tear down nodes in the last N minutes of their billing hour |
 | `PROVISIONING_TIMEOUT_SECS` | `600` | Max time to wait for a node to become ready |
-| `HETZNER_SERVER_TYPE` | `ccx33` | Hetzner instance type |
-| `HETZNER_LOCATION` | `nbg1` | Hetzner datacenter location |
+| `HETZNER_SERVER_TYPE` | `ccx33` | Hetzner instance type, or a comma-separated list in order of preference (e.g. `cx53,ccx33`) |
+| `HETZNER_LOCATION` | `nbg1` | Hetzner location, or a comma-separated list in order of preference (e.g. `fsn1,nbg1`) |
+| `PLACEMENT_COOLDOWN_SECS` | `300` | How long a server type/location without capacity is skipped before it is tried again |
 | `HETZNER_IMAGE` | `ubuntu-24.04` | OS image for new servers |
 | `K3S_AGENT_ARGS` | `--node-label=managed-by=gitea-ci-autoscaler --node-label=node-role=ci-runner` | Extra arguments appended to the `k3s agent` command in each node's cloud-init. Use to set node labels, taints, etc. (e.g. add `--node-taint=ci=true:NoSchedule`) |
 | `PUSHGATEWAY_URL` | *required* | Prometheus Pushgateway endpoint |
+
+### Fallback
+
+With several server types or locations, every location is tried for the first type before the next type is used: `HETZNER_SERVER_TYPE=cx53,ccx33` and `HETZNER_LOCATION=fsn1,nbg1` gives the order cx53/fsn1, cx53/nbg1, ccx33/fsn1, ccx33/nbg1.
+
+A type/location is skipped for `PLACEMENT_COOLDOWN_SECS` when Hetzner rejects a create as `resource_unavailable`, or accepts it and then drops the server without an error. After the cooldown the preferred one is tried again, so nodes return to it once stock is back.
+
+Runner pods must cope with every configured type: Docker rejects a `--cpus` job limit above the node's core count.
 
 ## Metrics
 
@@ -46,7 +55,8 @@ Pushes Prometheus metrics to the configured Pushgateway, including:
 
 - Node counts by state (provisioning, busy, idle, draining, removing)
 - Waiting and running job counts
-- Nodes created/deleted totals
+- Nodes created/deleted totals, and nodes created per server type and location
+- Placements Hetzner had no capacity for, per server type and location
 - Scale up/down error counts
 - API latency histograms (Hetzner, Gitea, K8s)
 - Per-node age and idle duration

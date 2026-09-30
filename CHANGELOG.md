@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+### Added
+
+- Fallback server types and locations: `HETZNER_SERVER_TYPE` and `HETZNER_LOCATION`
+  accept comma-separated lists. Every location is tried for the first type, then for
+  the next. A single value behaves as before.
+- A placement Hetzner has no capacity for is skipped for `PLACEMENT_COOLDOWN_SECS`
+  (default 300) instead of being retried on every loop iteration.
+- Metrics `autoscaler_placement_unavailable_total` and
+  `autoscaler_nodes_created_by_placement_total`, both labelled by server type and location.
+- The `created hetzner server` log line carries `server_type` and `location`.
+
+### Fixed
+
+- A server Hetzner accepts but never places (it disappears from the API without an
+  error) is detected after 20 seconds and replaced from the next placement. It used
+  to count as provisioning until `PROVISIONING_TIMEOUT_SECS` ran out.
+
 ## [0.3.2]
 
 ### Fixed

@@ -1,10 +1,11 @@
 use chrono::{DateTime, Duration, Utc};
-use tracing::{info, warn};
+use std::collections::HashMap;
+use tracing::{debug, info, warn};
 
 use crate::cloud_init;
 use crate::config::Config;
 use crate::gitea::{GiteaClient, Runner};
-use crate::hetzner::HetznerClient;
+use crate::hetzner::{CreateError, HetznerClient, HetznerServer, Placement};
 use crate::k8s::KubeClient;
 use crate::metrics::Metrics;
 
@@ -53,10 +54,17 @@ impl NodeState {
     }
 }
 
+/// A new server can lag behind in `list_servers`; only after this is a missing one looked up.
+const VANISH_GRACE_SECS: i64 = 20;
+
 pub struct NodeManager {
     pub nodes: Vec<ManagedNode>,
     pub k3s_version: String,
     pub master_ip: String,
+    /// Placements Hetzner had no capacity for, and when to try them again.
+    unavailable_until: HashMap<Placement, DateTime<Utc>>,
+    /// Where each server that has not joined yet was created, to blame if it vanishes.
+    pending_placements: HashMap<i64, Placement>,
 }
 
 impl NodeManager {
@@ -65,6 +73,8 @@ impl NodeManager {
             nodes: Vec::new(),
             k3s_version,
             master_ip,
+            unavailable_until: HashMap::new(),
+            pending_placements: HashMap::new(),
         }
     }
 
@@ -103,31 +113,149 @@ impl NodeManager {
         config: &Config,
         hetzner: &dyn HetznerClient,
         metrics: &Metrics,
+        now: DateTime<Utc>,
     ) {
+        self.unavailable_until.retain(|_, until| *until > now);
         for _ in 0..count {
-            let name = format!("ci-runner-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-            let cloud_init_data = cloud_init::render(
-                &self.master_ip,
-                &config.cluster_secret,
-                &self.k3s_version,
-                &config.k3s_agent_args,
-            );
+            if !self.create_server(config, hetzner, metrics, now).await {
+                break;
+            }
+        }
+    }
 
-            info!(server_name = %name, "creating Hetzner server");
-            match hetzner.create_server(&name, &cloud_init_data).await {
+    /// Create one server in the first placement with capacity. False when none has any.
+    async fn create_server(
+        &mut self,
+        config: &Config,
+        hetzner: &dyn HetznerClient,
+        metrics: &Metrics,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let name = format!("ci-runner-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let cloud_init_data = cloud_init::render(
+            &self.master_ip,
+            &config.cluster_secret,
+            &self.k3s_version,
+            &config.k3s_agent_args,
+        );
+
+        let mut tried = false;
+        for placement in config.placements() {
+            if self.unavailable_until.contains_key(&placement) {
+                continue;
+            }
+            tried = true;
+
+            info!(
+                server_name = %name,
+                server_type = %placement.server_type,
+                location = %placement.location,
+                "creating Hetzner server"
+            );
+            match hetzner
+                .create_server(&name, &cloud_init_data, &placement)
+                .await
+            {
                 Ok(server) => {
                     metrics.nodes_created_total.inc();
+                    metrics
+                        .nodes_created_by_placement_total
+                        .with_label_values(&[&placement.server_type, &placement.location])
+                        .inc();
+                    self.pending_placements.insert(server.id, placement);
                     self.nodes.push(ManagedNode {
                         hetzner_server_id: server.id,
                         hetzner_server_name: server.name,
                         created_at: server.created,
                         state: NodeState::Provisioning,
                     });
+                    return true;
                 }
-                Err(e) => {
+                Err(CreateError::Unavailable(e)) => {
+                    warn!(
+                        error = %e,
+                        server_type = %placement.server_type,
+                        location = %placement.location,
+                        "placement unavailable, trying the next one"
+                    );
+                    self.mark_unavailable(placement, config, metrics, now);
+                }
+                Err(CreateError::Other(e)) => {
                     warn!(error = %e, "failed to create Hetzner server");
                     metrics.scale_up_errors_total.inc();
+                    return true;
                 }
+            }
+        }
+
+        if tried {
+            warn!("no placement has capacity, waiting for the cooldown");
+        } else {
+            debug!("every placement is cooling down, not creating a server");
+        }
+        false
+    }
+
+    fn mark_unavailable(
+        &mut self,
+        placement: Placement,
+        config: &Config,
+        metrics: &Metrics,
+        now: DateTime<Utc>,
+    ) {
+        metrics
+            .placement_unavailable_total
+            .with_label_values(&[&placement.server_type, &placement.location])
+            .inc();
+        let cooldown = Duration::seconds(config.placement_cooldown_secs as i64);
+        self.unavailable_until.insert(placement, now + cooldown);
+    }
+
+    /// Forget provisioning servers that Hetzner accepted but never placed. They vanish
+    /// from the API without an error, so their placement is treated as unavailable.
+    pub async fn drop_vanished_servers(
+        &mut self,
+        listed: &[HetznerServer],
+        config: &Config,
+        hetzner: &dyn HetznerClient,
+        metrics: &Metrics,
+        now: DateTime<Utc>,
+    ) {
+        self.pending_placements.retain(|id, _| {
+            self.nodes
+                .iter()
+                .any(|n| n.hetzner_server_id == *id && n.state == NodeState::Provisioning)
+        });
+
+        let missing: Vec<i64> = self
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.state == NodeState::Provisioning
+                    && (now - n.created_at).num_seconds() >= VANISH_GRACE_SECS
+                    && !listed.iter().any(|s| s.id == n.hetzner_server_id)
+            })
+            .map(|n| n.hetzner_server_id)
+            .collect();
+
+        for server_id in missing {
+            match hetzner.server_exists(server_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.nodes.retain(|n| n.hetzner_server_id != server_id);
+                    metrics.scale_up_errors_total.inc();
+                    let placement = self.pending_placements.remove(&server_id);
+                    warn!(
+                        server_id,
+                        server_type = placement.as_ref().map(|p| p.server_type.as_str()),
+                        location = placement.as_ref().map(|p| p.location.as_str()),
+                        "server vanished before it was placed"
+                    );
+                    if let Some(placement) = placement {
+                        self.mark_unavailable(placement, config, metrics, now);
+                    }
+                }
+                Err(e) => warn!(error = %e, server_id, "failed to look up missing server"),
             }
         }
     }
@@ -680,6 +808,89 @@ mod tests {
     }
 
     // --- Stuck server deletion ---
+
+    fn fallback_config() -> Config {
+        Config {
+            poll_interval_secs: 5,
+            max_nodes: 5,
+            idle_timeout_mins: 5,
+            billing_window_mins: 5,
+            provisioning_timeout_secs: 600,
+            hetzner_server_types: vec!["cx53".into(), "ccx33".into()],
+            hetzner_locations: vec!["fsn1".into()],
+            placement_cooldown_secs: 300,
+            hetzner_image: "ubuntu-24.04".into(),
+            hetzner_api_token: "test".into(),
+            cluster_secret: "test-token".into(),
+            gitea_api_url: "http://localhost:3000".into(),
+            gitea_admin_token: "test".into(),
+            pushgateway_url: "http://localhost:9091".into(),
+            runner_namespace: "gitea-runners".into(),
+            k3s_agent_args: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn preferred_placement_is_retried_after_cooldown() {
+        let config = fallback_config();
+        let metrics = Metrics::new();
+        let hetzner = MockHetznerClient::new();
+        let cx53 = Placement {
+            server_type: "cx53".into(),
+            location: "fsn1".into(),
+        };
+        let ccx33 = Placement {
+            server_type: "ccx33".into(),
+            location: "fsn1".into(),
+        };
+        hetzner.unavailable.lock().unwrap().push(cx53.clone());
+
+        let mut mgr = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+        let now = Utc::now();
+
+        mgr.scale_up(1, &config, &hetzner, &metrics, now).await;
+        // Still cooling down: goes straight to the fallback.
+        mgr.scale_up(1, &config, &hetzner, &metrics, now + Duration::seconds(299))
+            .await;
+        // Stock is back and the cooldown is over: the preferred type is used again.
+        hetzner.unavailable.lock().unwrap().clear();
+        mgr.scale_up(1, &config, &hetzner, &metrics, now + Duration::seconds(301))
+            .await;
+
+        assert_eq!(
+            *hetzner.create_attempts.lock().unwrap(),
+            [cx53.clone(), ccx33.clone(), ccx33, cx53]
+        );
+        assert_eq!(mgr.nodes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn missing_server_is_kept_during_grace_and_while_it_exists() {
+        let config = fallback_config();
+        let metrics = Metrics::new();
+        let hetzner = MockHetznerClient::new();
+        let mut mgr = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+        let now = Utc::now();
+
+        mgr.scale_up(1, &config, &hetzner, &metrics, now).await;
+
+        // Not listed yet, but too young to be looked up.
+        mgr.drop_vanished_servers(&[], &config, &hetzner, &metrics, now)
+            .await;
+        assert_eq!(mgr.nodes.len(), 1);
+
+        // Not listed after the grace period, but Hetzner still knows it.
+        let later = now + Duration::seconds(VANISH_GRACE_SECS + 1);
+        mgr.drop_vanished_servers(&[], &config, &hetzner, &metrics, later)
+            .await;
+        assert_eq!(mgr.nodes.len(), 1);
+
+        // Gone for good.
+        hetzner.servers.lock().unwrap().clear();
+        mgr.drop_vanished_servers(&[], &config, &hetzner, &metrics, later)
+            .await;
+        assert!(mgr.nodes.is_empty());
+    }
 
     #[tokio::test]
     async fn delete_stuck_server_not_in_nodes() {
