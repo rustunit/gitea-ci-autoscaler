@@ -3,7 +3,7 @@ use chrono::Utc;
 use std::sync::Mutex;
 
 use crate::gitea::{GiteaClient, Job, JobStatus, Runner};
-use crate::hetzner::{HetznerClient, HetznerServer};
+use crate::hetzner::{CreateError, HetznerClient, HetznerServer, Placement};
 use crate::k8s::{K8sNode, K8sPod, KubeClient};
 
 // --- Mock Gitea Client ---
@@ -61,6 +61,12 @@ impl GiteaClient for MockGiteaClient {
 pub struct MockHetznerClient {
     pub servers: Mutex<Vec<HetznerServer>>,
     pub create_calls: Mutex<Vec<(String, String)>>,
+    /// Every create attempt, including rejected ones.
+    pub create_attempts: Mutex<Vec<Placement>>,
+    /// Placements rejected with "resource unavailable".
+    pub unavailable: Mutex<Vec<Placement>>,
+    /// Placements whose servers are accepted but never show up (created a minute ago).
+    pub vanishing: Mutex<Vec<Placement>>,
     pub delete_calls: Mutex<Vec<i64>>,
     pub fail_create: Mutex<bool>,
     pub fail_delete: Mutex<bool>,
@@ -72,6 +78,9 @@ impl MockHetznerClient {
         Self {
             servers: Mutex::new(Vec::new()),
             create_calls: Mutex::new(Vec::new()),
+            create_attempts: Mutex::new(Vec::new()),
+            unavailable: Mutex::new(Vec::new()),
+            vanishing: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
             fail_create: Mutex::new(false),
             fail_delete: Mutex::new(false),
@@ -82,20 +91,32 @@ impl MockHetznerClient {
 
 #[async_trait]
 impl HetznerClient for MockHetznerClient {
-    async fn create_server(&self, name: &str, cloud_init: &str) -> anyhow::Result<HetznerServer> {
+    async fn create_server(
+        &self,
+        name: &str,
+        cloud_init: &str,
+        placement: &Placement,
+    ) -> Result<HetznerServer, CreateError> {
         if *self.fail_create.lock().unwrap() {
-            return Err(anyhow::anyhow!("mock: Hetzner create failed"));
+            return Err(anyhow::anyhow!("mock: Hetzner create failed").into());
+        }
+        self.create_attempts.lock().unwrap().push(placement.clone());
+        if self.unavailable.lock().unwrap().contains(placement) {
+            return Err(CreateError::Unavailable(
+                "mock: resource_unavailable".to_string(),
+            ));
         }
         self.create_calls
             .lock()
             .unwrap()
             .push((name.to_string(), cloud_init.to_string()));
 
+        let vanishes = self.vanishing.lock().unwrap().contains(placement);
         let mut id = self.next_server_id.lock().unwrap();
         let server = HetznerServer {
             id: *id,
             name: name.to_string(),
-            created: Utc::now(),
+            created: Utc::now() - chrono::Duration::minutes(i64::from(vanishes)),
             labels: {
                 let mut m = std::collections::HashMap::new();
                 m.insert("managed-by".to_string(), "gitea-ci-autoscaler".to_string());
@@ -103,12 +124,23 @@ impl HetznerClient for MockHetznerClient {
             },
         };
         *id += 1;
-        self.servers.lock().unwrap().push(server.clone());
+        if !vanishes {
+            self.servers.lock().unwrap().push(server.clone());
+        }
         Ok(server)
     }
 
     async fn list_servers(&self) -> anyhow::Result<Vec<HetznerServer>> {
         Ok(self.servers.lock().unwrap().clone())
+    }
+
+    async fn server_exists(&self, server_id: i64) -> anyhow::Result<bool> {
+        Ok(self
+            .servers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.id == server_id))
     }
 
     async fn delete_server(&self, server_id: i64) -> anyhow::Result<()> {

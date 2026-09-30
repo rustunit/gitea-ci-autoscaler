@@ -1,6 +1,8 @@
 use std::env;
 use thiserror::Error;
 
+use crate::hetzner::Placement;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("missing required environment variable: {0}")]
@@ -16,8 +18,12 @@ pub struct Config {
     pub idle_timeout_mins: u64,
     pub billing_window_mins: u64,
     pub provisioning_timeout_secs: u64,
-    pub hetzner_server_type: String,
-    pub hetzner_location: String,
+    /// Server types in order of preference; later ones are fallbacks.
+    pub hetzner_server_types: Vec<String>,
+    /// Locations in order of preference, tried for each server type in turn.
+    pub hetzner_locations: Vec<String>,
+    /// How long a placement Hetzner reported as unavailable is skipped.
+    pub placement_cooldown_secs: u64,
     pub hetzner_image: String,
     pub hetzner_api_token: String,
     pub cluster_secret: String,
@@ -40,8 +46,9 @@ impl Config {
             idle_timeout_mins: parse_env_or("IDLE_TIMEOUT_MINS", 5)?,
             billing_window_mins: parse_env_or("BILLING_WINDOW_MINS", 5)?,
             provisioning_timeout_secs: parse_env_or("PROVISIONING_TIMEOUT_SECS", 600)?,
-            hetzner_server_type: env_or("HETZNER_SERVER_TYPE", "ccx33"),
-            hetzner_location: env_or("HETZNER_LOCATION", "nbg1"),
+            hetzner_server_types: list_env_or("HETZNER_SERVER_TYPE", "ccx33")?,
+            hetzner_locations: list_env_or("HETZNER_LOCATION", "nbg1")?,
+            placement_cooldown_secs: parse_env_or("PLACEMENT_COOLDOWN_SECS", 300)?,
             hetzner_image: env_or("HETZNER_IMAGE", "ubuntu-24.04"),
             hetzner_api_token: required_env("HETZNER_API_TOKEN")?,
             cluster_secret: required_env("CLUSTER_SECRET")?,
@@ -52,6 +59,21 @@ impl Config {
             k3s_agent_args: env_or("K3S_AGENT_ARGS", DEFAULT_K3S_AGENT_ARGS),
         })
     }
+
+    /// Every server type in every location, the preferred type first.
+    pub fn placements(&self) -> Vec<Placement> {
+        self.hetzner_server_types
+            .iter()
+            .flat_map(|server_type| {
+                self.hetzner_locations
+                    .iter()
+                    .map(move |location| Placement {
+                        server_type: server_type.clone(),
+                        location: location.clone(),
+                    })
+            })
+            .collect()
+    }
 }
 
 fn required_env(key: &str) -> Result<String, ConfigError> {
@@ -60,6 +82,21 @@ fn required_env(key: &str) -> Result<String, ConfigError> {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Comma-separated list; a single value is a list of one.
+fn list_env_or(key: &str, default: &str) -> Result<Vec<String>, ConfigError> {
+    let raw = env_or(key, default);
+    let items: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if items.is_empty() {
+        return Err(ConfigError::InvalidValue(key.to_string(), raw));
+    }
+    Ok(items)
 }
 
 fn parse_env_or<T: std::str::FromStr>(key: &str, default: T) -> Result<T, ConfigError> {
@@ -89,6 +126,7 @@ mod tests {
             "PROVISIONING_TIMEOUT_SECS",
             "HETZNER_SERVER_TYPE",
             "HETZNER_LOCATION",
+            "PLACEMENT_COOLDOWN_SECS",
             "HETZNER_IMAGE",
             "HETZNER_API_TOKEN",
             "CLUSTER_SECRET",
@@ -124,8 +162,9 @@ mod tests {
         assert_eq!(config.idle_timeout_mins, 5);
         assert_eq!(config.billing_window_mins, 5);
         assert_eq!(config.provisioning_timeout_secs, 600);
-        assert_eq!(config.hetzner_server_type, "ccx33");
-        assert_eq!(config.hetzner_location, "nbg1");
+        assert_eq!(config.hetzner_server_types, ["ccx33"]);
+        assert_eq!(config.hetzner_locations, ["nbg1"]);
+        assert_eq!(config.placement_cooldown_secs, 300);
         assert_eq!(config.hetzner_image, "ubuntu-24.04");
         assert_eq!(config.gitea_api_url, "http://gitea.example.com");
         assert_eq!(config.runner_namespace, "gitea-runners");
@@ -167,7 +206,42 @@ mod tests {
         assert_eq!(config.poll_interval_secs, 10);
         assert_eq!(config.max_nodes, 3);
         assert_eq!(config.idle_timeout_mins, 10);
-        assert_eq!(config.hetzner_server_type, "cx22");
+        assert_eq!(config.hetzner_server_types, ["cx22"]);
+    }
+
+    #[test]
+    fn config_placements_prefer_type_over_location() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        unsafe {
+            env::set_var("HETZNER_SERVER_TYPE", "cx53, ccx33");
+            env::set_var("HETZNER_LOCATION", "fsn1,nbg1,");
+        }
+
+        let config = Config::from_env().unwrap();
+        let placements: Vec<_> = config
+            .placements()
+            .into_iter()
+            .map(|p| format!("{}/{}", p.server_type, p.location))
+            .collect();
+        assert_eq!(
+            placements,
+            ["cx53/fsn1", "cx53/nbg1", "ccx33/fsn1", "ccx33/nbg1"]
+        );
+    }
+
+    #[test]
+    fn config_empty_server_type_list() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_env();
+        set_required_env();
+        unsafe {
+            env::set_var("HETZNER_SERVER_TYPE", " , ");
+        }
+
+        let err = Config::from_env().unwrap_err();
+        assert!(err.to_string().contains("HETZNER_SERVER_TYPE"));
     }
 
     #[test]

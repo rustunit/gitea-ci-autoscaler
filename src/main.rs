@@ -41,11 +41,14 @@ async fn main() -> anyhow::Result<()> {
     );
     let hetzner = RealHetznerClient::new(
         config.hetzner_api_token.clone(),
-        config.hetzner_server_type.clone(),
-        config.hetzner_location.clone(),
         config.hetzner_image.clone(),
     )
     .await?;
+    info!(
+        server_types = ?config.hetzner_server_types,
+        locations = ?config.hetzner_locations,
+        "placement order"
+    );
     let kube = RealKubeClient::new().await?;
     let metrics = Metrics::new();
 
@@ -187,6 +190,9 @@ async fn run_loop_iteration(
     }
 
     manager.nodes = nodes;
+    manager
+        .drop_vanished_servers(&hetzner_servers, config, hetzner, metrics, now)
+        .await;
 
     // Handle stuck servers (from both reconcile and carry_forward), deduplicated
     let mut all_actions: Vec<_> = actions.into_iter().chain(carry_forward_actions).collect();
@@ -233,7 +239,7 @@ async fn run_loop_iteration(
     if scale_up_count > 0 {
         info!(count = scale_up_count, "scaling up");
         manager
-            .scale_up(scale_up_count, config, hetzner, metrics)
+            .scale_up(scale_up_count, config, hetzner, metrics, now)
             .await;
     }
 
@@ -297,8 +303,9 @@ mod tests {
             idle_timeout_mins: 5,
             billing_window_mins: 5,
             provisioning_timeout_secs: 600,
-            hetzner_server_type: "ccx33".into(),
-            hetzner_location: "nbg1".into(),
+            hetzner_server_types: vec!["ccx33".into()],
+            hetzner_locations: vec!["nbg1".into()],
+            placement_cooldown_secs: 300,
             hetzner_image: "ubuntu-24.04".into(),
             hetzner_api_token: "test".into(),
             cluster_secret: "test-token".into(),
@@ -585,6 +592,163 @@ mod tests {
             manager.nodes[0].state,
             node_manager::NodeState::Provisioning
         ));
+    }
+
+    fn placement(server_type: &str, location: &str) -> crate::hetzner::Placement {
+        crate::hetzner::Placement {
+            server_type: server_type.into(),
+            location: location.into(),
+        }
+    }
+
+    fn make_fallback_config() -> Config {
+        Config {
+            hetzner_server_types: vec!["cx53".into(), "ccx33".into()],
+            hetzner_locations: vec!["fsn1".into(), "nbg1".into()],
+            ..make_config()
+        }
+    }
+
+    #[tokio::test]
+    async fn falls_back_when_preferred_type_is_out_of_stock() {
+        let config = make_fallback_config();
+        let metrics = Metrics::new();
+        let mock_gitea = MockGiteaClient::new();
+        let mock_hetzner = MockHetznerClient::new();
+        let mock_kube = MockKubeClient::new();
+
+        mock_gitea
+            .jobs
+            .lock()
+            .unwrap()
+            .extend(vec![make_waiting_linux_job(1), make_waiting_linux_job(2)]);
+        mock_hetzner
+            .unavailable
+            .lock()
+            .unwrap()
+            .extend([placement("cx53", "fsn1"), placement("cx53", "nbg1")]);
+
+        let mut manager = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+
+        run_loop_iteration(
+            &mut manager,
+            &mock_gitea,
+            &mock_hetzner,
+            &mock_kube,
+            &metrics,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        // Both servers land on the fallback type; the second skips the cooling-down cx53.
+        assert_eq!(manager.nodes.len(), 2);
+        assert_eq!(
+            *mock_hetzner.create_attempts.lock().unwrap(),
+            [
+                placement("cx53", "fsn1"),
+                placement("cx53", "nbg1"),
+                placement("ccx33", "fsn1"),
+                placement("ccx33", "fsn1"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_retry_storm_when_nothing_is_in_stock() {
+        let config = make_fallback_config();
+        let metrics = Metrics::new();
+        let mock_gitea = MockGiteaClient::new();
+        let mock_hetzner = MockHetznerClient::new();
+        let mock_kube = MockKubeClient::new();
+
+        mock_gitea
+            .jobs
+            .lock()
+            .unwrap()
+            .extend(vec![make_waiting_linux_job(1), make_waiting_linux_job(2)]);
+        mock_hetzner
+            .unavailable
+            .lock()
+            .unwrap()
+            .extend(config.placements());
+
+        let mut manager = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+
+        for _ in 0..3 {
+            run_loop_iteration(
+                &mut manager,
+                &mock_gitea,
+                &mock_hetzner,
+                &mock_kube,
+                &metrics,
+                &config,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Each placement is tried once, then left alone until its cooldown ends.
+        assert_eq!(manager.nodes.len(), 0);
+        assert_eq!(mock_hetzner.create_attempts.lock().unwrap().len(), 4);
+    }
+
+    /// 2026-09-30: Hetzner accepted cx53 creates, then dropped the servers without an error.
+    #[tokio::test]
+    async fn falls_back_when_accepted_server_vanishes() {
+        let config = make_fallback_config();
+        let metrics = Metrics::new();
+        let mock_gitea = MockGiteaClient::new();
+        let mock_hetzner = MockHetznerClient::new();
+        let mock_kube = MockKubeClient::new();
+
+        mock_gitea
+            .jobs
+            .lock()
+            .unwrap()
+            .push(make_waiting_linux_job(1));
+        mock_hetzner
+            .vanishing
+            .lock()
+            .unwrap()
+            .push(placement("cx53", "fsn1"));
+
+        let mut manager = NodeManager::new("v1.32.0+k3s1".into(), "10.0.0.1".into());
+
+        // First iteration: the create is accepted, so the node counts as provisioning.
+        run_loop_iteration(
+            &mut manager,
+            &mock_gitea,
+            &mock_hetzner,
+            &mock_kube,
+            &metrics,
+            &config,
+        )
+        .await
+        .unwrap();
+        assert_eq!(manager.nodes.len(), 1);
+        let ghost_id = manager.nodes[0].hetzner_server_id;
+
+        // Second iteration: the server is gone, so it is replaced from the next placement.
+        run_loop_iteration(
+            &mut manager,
+            &mock_gitea,
+            &mock_hetzner,
+            &mock_kube,
+            &metrics,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.nodes.len(), 1);
+        assert_ne!(manager.nodes[0].hetzner_server_id, ghost_id);
+        assert_eq!(
+            *mock_hetzner.create_attempts.lock().unwrap(),
+            [placement("cx53", "fsn1"), placement("cx53", "nbg1")]
+        );
+        // The ghost was never deleted: there is nothing left to delete.
+        assert!(mock_hetzner.delete_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

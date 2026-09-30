@@ -1,4 +1,6 @@
-use prometheus::{Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, IntCounter, Opts, Registry};
+use prometheus::{
+    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, Opts, Registry,
+};
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -6,6 +8,8 @@ pub struct Metrics {
     pub desired_nodes: Gauge,
     pub managed_nodes: GaugeVec,
     pub nodes_created_total: IntCounter,
+    pub nodes_created_by_placement_total: IntCounterVec,
+    pub placement_unavailable_total: IntCounterVec,
     pub nodes_deleted_total: IntCounter,
     pub scale_up_errors_total: IntCounter,
     pub scale_down_errors_total: IntCounter,
@@ -36,6 +40,22 @@ impl Metrics {
         .expect("metric");
         let nodes_created_total =
             IntCounter::new("autoscaler_nodes_created_total", "Servers created").expect("metric");
+        let nodes_created_by_placement_total = IntCounterVec::new(
+            Opts::new(
+                "autoscaler_nodes_created_by_placement_total",
+                "Servers created per server type and location",
+            ),
+            &["server_type", "location"],
+        )
+        .expect("metric");
+        let placement_unavailable_total = IntCounterVec::new(
+            Opts::new(
+                "autoscaler_placement_unavailable_total",
+                "Times Hetzner had no capacity for a server type in a location",
+            ),
+            &["server_type", "location"],
+        )
+        .expect("metric");
         let nodes_deleted_total =
             IntCounter::new("autoscaler_nodes_deleted_total", "Servers deleted").expect("metric");
         let scale_up_errors_total =
@@ -117,6 +137,12 @@ impl Metrics {
             .register(Box::new(nodes_created_total.clone()))
             .expect("register");
         registry
+            .register(Box::new(nodes_created_by_placement_total.clone()))
+            .expect("register");
+        registry
+            .register(Box::new(placement_unavailable_total.clone()))
+            .expect("register");
+        registry
             .register(Box::new(nodes_deleted_total.clone()))
             .expect("register");
         registry
@@ -163,6 +189,8 @@ impl Metrics {
             desired_nodes,
             managed_nodes,
             nodes_created_total,
+            nodes_created_by_placement_total,
+            placement_unavailable_total,
             nodes_deleted_total,
             scale_up_errors_total,
             scale_down_errors_total,
