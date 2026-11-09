@@ -250,7 +250,7 @@ impl NodeManager {
                 Ok(true) => {}
                 Ok(false) => {
                     self.nodes.retain(|n| n.hetzner_server_id != server_id);
-                    metrics.scale_up_errors_total.inc();
+                    // Not a scale-up error: like a 412, it counts as a placement miss and falls back.
                     let placement = self.pending_placements.remove(&server_id);
                     warn!(
                         server_id,
@@ -953,6 +953,7 @@ mod tests {
         mgr.drop_vanished_servers(&[], &config, &hetzner, &metrics, later)
             .await;
         assert!(mgr.nodes.is_empty());
+        assert_eq!(metrics.scale_up_errors_total.get(), 0);
     }
 
     fn k8s_node(name: &str, ready: bool) -> K8sNode {

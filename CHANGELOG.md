@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2]
+
+### Fixed
+
+- Cloud-init retries the k3s install up to 10 times, 10 seconds apart, and each
+  download times out after 60 seconds. `install.sh` fetches the k3s binary from GitHub
+  releases without retrying. While GitHub returned 504s on unauthenticated downloads,
+  new nodes never joined and were replaced only after `PROVISIONING_TIMEOUT_SECS`.
+
+### Changed
+
+- A server that Hetzner accepts but never places no longer increments
+  `autoscaler_scale_up_errors_total`. Like a 412 `resource_unavailable` response, it
+  counts toward `autoscaler_placement_unavailable_total` and the autoscaler falls
+  back to the next placement. Alerts on scale-up errors no longer fire when cx53 is
+  out of stock.
+
 ## [0.4.1]
 
 ### Fixed
